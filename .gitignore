@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local configs
+settings.json
+
+# Run outputs
+runs/
+
+# Streamlit cache
+.streamlit/
