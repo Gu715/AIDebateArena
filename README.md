@@ -60,7 +60,7 @@ pip install streamlit plotly matplotlib langgraph openai
 streamlit run ui_app.py
 ```
 
-浏览器会自动打开一个本地页面（默认地址为 http://localhost:8501）。
+浏览器会自动打开一个本地页面（默认地址为 [http://localhost:8501](http://localhost:8501)）。
 
 也可以通过命令行方式运行，不依赖 Streamlit UI：  
 
