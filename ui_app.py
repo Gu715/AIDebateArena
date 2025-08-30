@@ -5,7 +5,7 @@ Streamlit UI for DebateAgentTeam
 - Pro/Con/Judge/Host 颜色区分（绿/红/蓝/灰）
 - 判决展示：胜者高亮 + 双方分数卡片 + 交互式雷达图（argument/evidence/rebuttal/clarity）+ 理由
 - “检查设置”推荐但不强制；仅检查通过才保存到 settings.json
-- 历史对局：打开 runs/*.json，查看并下载
+- 历史对局：打开 runs/*.json，查看
 - 持久化 LLM 配置到 settings.json；启动时自动读取并预填
 
 运行：
@@ -39,18 +39,21 @@ def _reset_settings_ok():
     st.session_state["settings_ok"] = False
     st.session_state["settings_fingerprint"] = None
 
-# 渲染去重：维护一个已渲染键的列表（用于新对局时清空）
+# 初始化运行/检查状态与缓存
+if "is_running" not in st.session_state:
+    st.session_state["is_running"] = False
+if "is_checking" not in st.session_state:
+    st.session_state["is_checking"] = False
+if "check_feedback" not in st.session_state:
+    st.session_state["check_feedback"] = []  # 最近一次检查的消息列表
+
+# 其它状态
 if "rendered_keys" not in st.session_state:
     st.session_state["rendered_keys"] = []
-
-# 保留最近一次“运行得到的最终状态”
 if "last_run_state" not in st.session_state:
     st.session_state["last_run_state"] = None
-
-# 保留“从文件打开的状态”
 if "opened_run_data" not in st.session_state:
     st.session_state["opened_run_data"] = None
-
 if "settings_ok" not in st.session_state:
     _reset_settings_ok()
 
@@ -87,7 +90,7 @@ def load_settings() -> Dict[str, Any]:
 
 def save_settings(data: Dict[str, Any]):
     allowed = default_settings().keys()
-    payload = {k: data.get(k) for k in allowed}  # 只保存白名单字段
+    payload = {k: data.get(k) for k in allowed}
     SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # -------- Utils --------
@@ -100,14 +103,13 @@ def list_runs() -> Dict[str, Path]:
     return {p.stem: p for p in files}
 
 ROLE_COLORS = {
-    "Host": "#9ca3af",   # 灰
-    "Pro":  "#22c55e",   # 绿
-    "Con":  "#ef4444",   # 红
-    "Judge":"#3b82f6",   # 蓝
+    "Host": "#9ca3af",
+    "Pro":  "#22c55e",
+    "Con":  "#ef4444",
+    "Judge":"#3b82f6",
 }
 
 def _msg_key(m: Dict[str, Any]) -> str:
-    # 以 (ts, role, content_hash) 作为唯一键，避免重复渲染
     ts = m.get("ts", "")
     role = m.get("role", "")
     content = m.get("content", "")
@@ -118,19 +120,15 @@ def render_one_message(msg: Dict[str, Any]):
     ts = msg.get("ts", "")
     content = msg.get("content", "")
     color = ROLE_COLORS.get(role, "#dddddd")
-
     with st.chat_message(role):
-        # 时间条（HTML）
         st.markdown(
             f"<div style='border-left:6px solid {color};padding-left:12px;"
             f"color:#6b7280;font-size:0.85rem'>{ts}</div>",
             unsafe_allow_html=True,
         )
-        # 正文（Markdown 解析，支持 **加粗**）
         st.markdown(content)
 
 def render_transcript(transcript: List[Dict[str, Any]], start_idx: int = 0):
-    # 去重渲染：只有未渲染过的消息才显示
     rendered = set(st.session_state.get("rendered_keys", []))
     for i in range(start_idx, len(transcript)):
         m = transcript[i]
@@ -159,8 +157,6 @@ def radar_chart_interactive(scores_pro: Dict[str,int], scores_con: Dict[str,int]
     labels = ["argument", "evidence", "rebuttal", "clarity"]
     pro_vals = [scores_pro.get(k, 0) for k in labels]
     con_vals = [scores_con.get(k, 0) for k in labels]
-
-    # 闭合首尾点
     labels_loop = labels + [labels[0]]
     pro_loop = pro_vals + [pro_vals[0]]
     con_loop = con_vals + [con_vals[0]]
@@ -168,34 +164,20 @@ def radar_chart_interactive(scores_pro: Dict[str,int], scores_con: Dict[str,int]
     fig = go.Figure()
     if show_pro:
         fig.add_trace(go.Scatterpolar(
-            r=pro_loop,
-            theta=labels_loop,
-            fill='toself',
-            name='Pro',
-            line=dict(color='#22c55e'),
-            fillcolor='rgba(34,197,94,0.2)',
+            r=pro_loop, theta=labels_loop, fill='toself', name='Pro',
+            line=dict(color='#22c55e'), fillcolor='rgba(34,197,94,0.2)',
             hovertemplate='Pro · %{theta}: %{r}<extra></extra>'
         ))
     if show_con:
         fig.add_trace(go.Scatterpolar(
-            r=con_loop,
-            theta=labels_loop,
-            fill='toself',
-            name='Con',
-            line=dict(color='#ef4444'),
-            fillcolor='rgba(239,68,68,0.2)',
+            r=con_loop, theta=labels_loop, fill='toself', name='Con',
+            line=dict(color='#ef4444'), fillcolor='rgba(239,68,68,0.2)',
             hovertemplate='Con · %{theta}: %{r}<extra></extra>'
         ))
-
     fig.update_layout(
-        polar=dict(
-            radialaxis=dict(range=[0, 10], tickvals=[2,4,6,8,10])
-        ),
-        showlegend=True,
-        margin=dict(l=10, r=10, t=10, b=10),
-        height=320  # 紧凑
+        polar=dict(radialaxis=dict(range=[0, 10], tickvals=[2,4,6,8,10])),
+        showlegend=True, margin=dict(l=10, r=10, t=10, b=10), height=320
     )
-
     st.plotly_chart(fig, use_container_width=True)
 
 def render_verdict(verdict: Dict[str, Any]):
@@ -203,13 +185,11 @@ def render_verdict(verdict: Dict[str, Any]):
     if not verdict:
         st.info("尚无裁决（final_verdict 为空）。")
         return
-
     scores = verdict.get("scores", {})
     scores_pro = scores.get("Pro", {})
     scores_con = scores.get("Con", {})
     verdict_winner = verdict.get("verdict", "?")
     rationale = verdict.get("rationale", "")
-
     winner_badge(verdict_winner)
 
     def sum_scores(d: Dict[str,int]) -> int:
@@ -218,7 +198,6 @@ def render_verdict(verdict: Dict[str, Any]):
     total_con = sum_scores(scores_con)
     scores_two_columns(total_pro, total_con)
 
-    # 交互式雷达图：可选显示 Pro/Con（用固定 key，交互只影响 Plotly，不清空会话）
     cols = st.columns(3)
     with cols[0]:
         st.markdown("**Score Radar**")
@@ -252,159 +231,238 @@ st.set_page_config(page_title="AI Debate Arena", layout="wide")
 st.title("AI Debate Arena")
 st.caption("运行多轮 Pro vs Con 辩论，并由 Judge 终局裁决。支持增量渲染、配置持久化与可视化评分。")
 
-# 读取 settings.json 并预填
 _init_settings = load_settings()
 
-# 侧边栏：新对局 + 设置 + 维护 + 历史
-def _invalidate_check():
-    # 只有调整 Agent 配置才使检查失效
-    _reset_settings_ok()
+# ---------------- Sidebar（表单 + 运行/检查期禁用） ----------------
+disabled_ui = st.session_state.get("is_running", False) or st.session_state.get("is_checking", False)
 
 with st.sidebar:
     st.header("New Debate")
-    topic = st.text_area("Topic", value="是否应当在所有中学强制开设编程必修课？", height=80)
-    max_rounds = st.number_input("Rounds (each = Pro+Con)", min_value=1, max_value=10, value=3, step=1)
+    with st.form("new_debate_form", clear_on_submit=False):
+        topic = st.text_area(
+            "Topic",
+            value="是否应当在所有中学强制开设编程必修课？",
+            height=80,
+            key="topic_input",
+            disabled=disabled_ui,
+        )
+        max_rounds = st.number_input(
+            "Rounds (each = Pro+Con)",
+            min_value=1, max_value=10, value=3, step=1,
+            key="rounds_input",
+            disabled=disabled_ui,
+        )
+        run_submit = st.form_submit_button("Run Debate", use_container_width=True, disabled=disabled_ui)
 
     st.divider()
     st.header("Agent Settings (required)")
+    with st.form("agent_settings_form", clear_on_submit=False):
+        with st.expander("Pro Agent", expanded=True):
+            pro_key = st.text_input("Pro API Key", value=_init_settings.get("pro_key",""), type="password", key="pro_key", disabled=disabled_ui)
+            pro_url = st.text_input("Pro Base URL", value=_init_settings.get("pro_url",""), key="pro_url", disabled=disabled_ui)
+            pro_model = st.text_input("Pro Model", value=_init_settings.get("pro_model","qwen2.5-7b-instruct"), key="pro_model", disabled=disabled_ui)
+            pro_temp = st.number_input("Pro Temperature", min_value=0.0, max_value=2.0, value=float(_init_settings.get("pro_temp",0.7)), step=0.1, key="pro_temp", disabled=disabled_ui)
+        with st.expander("Con Agent", expanded=True):
+            con_key = st.text_input("Con API Key", value=_init_settings.get("con_key",""), type="password", key="con_key", disabled=disabled_ui)
+            con_url = st.text_input("Con Base URL", value=_init_settings.get("con_url",""), key="con_url", disabled=disabled_ui)
+            con_model = st.text_input("Con Model", value=_init_settings.get("con_model","qwen2.5-7b-instruct"), key="con_model", disabled=disabled_ui)
+            con_temp = st.number_input("Con Temperature", min_value=0.0, max_value=2.0, value=float(_init_settings.get("con_temp",0.7)), step=0.1, key="con_temp", disabled=disabled_ui)
+        with st.expander("Judge Agent", expanded=True):
+            judge_key = st.text_input("Judge API Key", value=_init_settings.get("judge_key",""), type="password", key="judge_key", disabled=disabled_ui)
+            judge_url = st.text_input("Judge Base URL", value=_init_settings.get("judge_url",""), key="judge_url", disabled=disabled_ui)
+            judge_model = st.text_input("Judge Model", value=_init_settings.get("judge_model","qwen2.5-14b-instruct"), key="judge_model", disabled=disabled_ui)
+            judge_temp = st.number_input("Judge Temperature", min_value=0.0, max_value=2.0, value=float(_init_settings.get("judge_temp",0.2)), step=0.1, key="judge_temp", disabled=disabled_ui)
 
-    # Pro
-    with st.expander("Pro Agent", expanded=True):
-        pro_key = st.text_input("Pro API Key", value=_init_settings.get("pro_key",""), type="password", key="pro_key", on_change=_invalidate_check)
-        pro_url = st.text_input("Pro Base URL", value=_init_settings.get("pro_url",""), key="pro_url", on_change=_invalidate_check)
-        pro_model = st.text_input("Pro Model", value=_init_settings.get("pro_model","qwen2.5-7b-instruct"), key="pro_model", on_change=_invalidate_check)
-        pro_temp = st.number_input("Pro Temperature", min_value=0.0, max_value=2.0, value=float(_init_settings.get("pro_temp",0.7)), step=0.1, key="pro_temp", on_change=_invalidate_check)
+        current_fp = fingerprint_settings((
+            pro_key, pro_url, pro_model, pro_temp,
+            con_key, con_url, con_model, con_temp,
+            judge_key, judge_url, judge_model, judge_temp,
+        ))
+        autosave = st.checkbox("检查通过后自动保存到 settings.json", value=True, key="autosave_checkbox", disabled=disabled_ui)
+        check_submit = st.form_submit_button("Check Settings", use_container_width=True, disabled=disabled_ui)
 
-    # Con
-    with st.expander("Con Agent", expanded=True):
-        con_key = st.text_input("Con API Key", value=_init_settings.get("con_key",""), type="password", key="con_key", on_change=_invalidate_check)
-        con_url = st.text_input("Con Base URL", value=_init_settings.get("con_url",""), key="con_url", on_change=_invalidate_check)
-        con_model = st.text_input("Con Model", value=_init_settings.get("con_model","qwen2.5-7b-instruct"), key="con_model", on_change=_invalidate_check)
-        con_temp = st.number_input("Con Temperature", min_value=0.0, max_value=2.0, value=float(_init_settings.get("con_temp",0.7)), step=0.1, key="con_temp", on_change=_invalidate_check)
+    # 检查进度提示：就在“Check Settings”按钮正下方
+    check_progress_box = st.empty()
+    if st.session_state.get("is_checking", False):
+        check_progress_box.info("正在检查 Agent 设置...")
 
-    # Judge
-    with st.expander("Judge Agent", expanded=True):
-        judge_key = st.text_input("Judge API Key", value=_init_settings.get("judge_key",""), type="password", key="judge_key", on_change=_invalidate_check)
-        judge_url = st.text_input("Judge Base URL", value=_init_settings.get("judge_url",""), key="judge_url", on_change=_invalidate_check)
-        judge_model = st.text_input("Judge Model", value=_init_settings.get("judge_model","qwen2.5-14b-instruct"), key="judge_model", on_change=_invalidate_check)
-        judge_temp = st.number_input("Judge Temperature", min_value=0.0, max_value=2.0, value=float(_init_settings.get("judge_temp",0.2)), step=0.1, key="judge_temp", on_change=_invalidate_check)
+    # 检查结果显示在 Agent 设置表单下方（一次性 Markdown）
+    check_feedback_box = st.empty()
+    if st.session_state.get("check_feedback") and not st.session_state.get("is_checking", False):
+        emoji = {"success": "✅", "error": "❌", "info": "ℹ️"}
+        lines = [f"{emoji.get(kind, '•')} {text}" for kind, text in st.session_state["check_feedback"]]
+        check_feedback_box.markdown("\n\n".join(lines))
 
-    # 指纹只包含 Agent 配置（不含 Topic/Rounds）
-    current_fp = fingerprint_settings((
-        pro_key, pro_url, pro_model, pro_temp,
-        con_key, con_url, con_model, con_temp,
-        judge_key, judge_url, judge_model, judge_temp,
-    ))
-
-    st.divider()
-    st.header("Settings Check")
-    autosave = st.checkbox("检查通过后自动保存到 settings.json", value=True)
-
-    if st.button("Check Settings", use_container_width=True):
-        # 必填校验
-        missing = []
-        if not pro_key: missing.append("Pro API Key")
-        if not pro_url: missing.append("Pro Base URL")
-        if not con_key: missing.append("Con API Key")
-        if not con_url: missing.append("Con Base URL")
-        if not judge_key: missing.append("Judge API Key")
-        if not judge_url: missing.append("Judge Base URL")
-        if missing:
-            st.error("以下字段必填： " + "、".join(missing))
-            _reset_settings_ok()
-        else:
-            try:
-                agents = build_agents(
-                    pro_key, pro_url, pro_model, float(pro_temp),
-                    con_key, con_url, con_model, float(con_temp),
-                    judge_key, judge_url, judge_model, float(judge_temp),
-                )
-                ok_all = True
-                for name in ("Pro", "Con", "Judge"):
-                    ok, info = quick_check_agent(agents[name])
-                    if ok:
-                        st.success(f"{name} OK")
-                    else:
-                        ok_all = False
-                        st.error(f"{name} FAILED: {info}")
-                if ok_all:
-                    st.session_state["settings_ok"] = True
-                    st.session_state["settings_fingerprint"] = current_fp
-                    st.success("All agents passed.")
-                    if autosave:
-                        save_settings({
-                            "pro_key": pro_key, "pro_url": pro_url, "pro_model": pro_model, "pro_temp": float(pro_temp),
-                            "con_key": con_key, "con_url": con_url, "con_model": con_model, "con_temp": float(con_temp),
-                            "judge_key": judge_key, "judge_url": judge_url, "judge_model": judge_model, "judge_temp": float(judge_temp),
-                        })
-                        st.info(f"Settings saved to {SETTINGS_PATH}")
-                else:
-                    _reset_settings_ok()
-            except Exception as e:
-                _reset_settings_ok()
-                st.error(f"构建或检查失败：{type(e).__name__}: {e}")
-
-    # Run Debate 不强制检查
-    run_button = st.button("Run Debate", use_container_width=True)
-    st.caption("建议：修改 Agent 配置后可点击 “Check Settings” 做一次快速检查并保存设置；修改 Topic/Rounds 不影响检查状态。")
+    # 点击“Check Settings”：进入检查态
+    if check_submit and not disabled_ui:
+        st.session_state["_pending_check"] = {
+            "pro_key": st.session_state.get("pro_key"),
+            "pro_url": st.session_state.get("pro_url"),
+            "pro_model": st.session_state.get("pro_model"),
+            "pro_temp": st.session_state.get("pro_temp"),
+            "con_key": st.session_state.get("con_key"),
+            "con_url": st.session_state.get("con_url"),
+            "con_model": st.session_state.get("con_model"),
+            "con_temp": st.session_state.get("con_temp"),
+            "judge_key": st.session_state.get("judge_key"),
+            "judge_url": st.session_state.get("judge_url"),
+            "judge_model": st.session_state.get("judge_model"),
+            "judge_temp": st.session_state.get("judge_temp"),
+            "autosave": st.session_state.get("autosave_checkbox", True),
+            "fp": current_fp,
+        }
+        st.session_state["is_checking"] = True
+        st.session_state["check_feedback"] = []  # 清空旧反馈
+        st.rerun()
 
     st.divider()
     st.header("Maintenance")
-    if st.button("Clear UI State", use_container_width=True):
+    clear_btn = st.button("Clear UI State", use_container_width=True, disabled=disabled_ui)
+    if clear_btn:
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
 
-    if st.button("Delete all runs/*", use_container_width=True):
+    del_btn = st.button("Delete all runs/*", use_container_width=True, disabled=disabled_ui)
+    if del_btn:
         shutil.rmtree(RUNS_PATH, ignore_errors=True)
         RUNS_PATH.mkdir(parents=True, exist_ok=True)
         st.success("All runs cleared.")
 
     st.divider()
     st.header("Previous Runs")
-    # 刷新按钮
-    if st.button("Refresh list", use_container_width=True):
+    refresh_btn = st.button("Refresh list", use_container_width=True, disabled=disabled_ui)
+    if refresh_btn:
         st.rerun()
 
     runs = list_runs()
-    options = list(runs.keys())  # 不再包含空白项
+    options = list(runs.keys())
     if options:
-        sel = st.selectbox("Open a saved run", options=options, index=0, key="open_selectbox")
-        if st.button("Open Selected", use_container_width=True):
+        with st.form("open_run_form", clear_on_submit=False):
+            sel = st.selectbox("Open a saved run", options=options, index=0, key="open_selectbox", disabled=disabled_ui)
+            open_submit = st.form_submit_button("Open Selected", use_container_width=True, disabled=disabled_ui)
+        if open_submit and not disabled_ui:
             path = runs[sel]
             st.session_state["opened_run_data"] = load_run_json(path)
-            st.session_state["last_run_state"] = None   # 打开文件时覆盖“最近运行”
-            st.session_state["rendered_keys"] = []      # 重置去重
-            st.success(f"Opened run: {sel}  ({path})")
+            st.session_state["last_run_state"] = None
+            st.session_state["rendered_keys"] = []
             st.rerun()
     else:
         st.caption("No saved runs yet.")
 
-# 主区域占位（提示在最上，状态在消息列表下）
-info_ph = st.empty()
-transcript_ph = st.container()
-status_ph = st.empty()
-verdict_ph = st.container()
+# 统一处理：Run 提交 → 进入运行态
+if 'run_submit' in locals() and run_submit and not st.session_state.get("is_running", False) and not st.session_state.get("is_checking", False):
+    st.session_state["_pending_run"] = {
+        "topic": st.session_state.get("topic_input"),
+        "max_rounds": st.session_state.get("rounds_input"),
+        "pro": {
+            "key": st.session_state.get("pro_key"), "url": st.session_state.get("pro_url"),
+            "model": st.session_state.get("pro_model"), "temp": st.session_state.get("pro_temp"),
+        },
+        "con": {
+            "key": st.session_state.get("con_key"), "url": st.session_state.get("con_url"),
+            "model": st.session_state.get("con_model"), "temp": st.session_state.get("con_temp"),
+        },
+        "judge": {
+            "key": st.session_state.get("judge_key"), "url": st.session_state.get("judge_url"),
+            "model": st.session_state.get("judge_model"), "temp": st.session_state.get("judge_temp"),
+        },
+    }
+    st.session_state["is_running"] = True
+    st.rerun()
 
-# 如果用户点了“Open Selected”后，或曾经运行过一次，这里负责重绘 UI
+# ---------------- 主区域占位 ----------------
+info_ph = st.empty()
+transcript_ph = st.empty()
+status_ph = st.empty()
+verdict_ph = st.empty()
+
 def _render_from_state(state: Dict[str, Any]):
-    with transcript_ph:
-        st.session_state["rendered_keys"] = []  # 重绘前清空去重
+    transcript_ph.empty()
+    verdict_ph.empty()
+    t_box = transcript_ph.container()
+    with t_box:
+        st.session_state["rendered_keys"] = []
         for m in state.get("transcript", []):
             render_one_message(m)
-    with verdict_ph:
+    v_box = verdict_ph.container()
+    with v_box:
         render_verdict(state.get("final_verdict", {}))
 
-# 打开历史对局（通过 session_state 持久化）
-if st.session_state.get("opened_run_data") is not None and not run_button:
-    data = st.session_state["opened_run_data"]
-    _render_from_state(data)
+# ---------------- 主逻辑分支（检查 > 运行 > 打开历史 > 最近状态 > 欢迎） ----------------
 
-# 启动新对局（增量渲染）
-elif run_button:
-    info_ph.empty()
+# A) 有挂起的“检查设置”任务 —— 检查期间保持主区域内容不变
+if st.session_state.get("is_checking", False) and st.session_state.get("_pending_check"):
+    payload = st.session_state["_pending_check"]
+    autosave = bool(payload.get("autosave", True))
+    current_fp = payload.get("fp", "")
 
-    # 最小必填校验（key/url）
+    # 保持主区域可见：优先显示打开的历史，其次显示最近一次运行
+    if st.session_state.get("opened_run_data") is not None:
+        _render_from_state(st.session_state["opened_run_data"])
+    elif st.session_state.get("last_run_state") is not None:
+        _render_from_state(st.session_state["last_run_state"])
+
+    feedback: List[Tuple[str, str]] = []
+    try:
+        missing = []
+        if not payload.get("pro_key"): missing.append("Pro API Key")
+        if not payload.get("pro_url"): missing.append("Pro Base URL")
+        if not payload.get("con_key"): missing.append("Con API Key")
+        if not payload.get("con_url"): missing.append("Con Base URL")
+        if not payload.get("judge_key"): missing.append("Judge API Key")
+        if not payload.get("judge_url"): missing.append("Judge Base URL")
+        if missing:
+            feedback.append(("error", "以下字段必填： " + "、".join(missing)))
+            _reset_settings_ok()
+        else:
+            agents = build_agents(
+                payload["pro_key"], payload["pro_url"], payload["pro_model"], float(payload["pro_temp"]),
+                payload["con_key"], payload["con_url"], payload["con_model"], float(payload["con_temp"]),
+                payload["judge_key"], payload["judge_url"], payload["judge_model"], float(payload["judge_temp"]),
+            )
+            ok_all = True
+            for name in ("Pro", "Con", "Judge"):
+                ok, info = quick_check_agent(agents[name])
+                if ok:
+                    feedback.append(("success", f"{name} OK"))
+                else:
+                    ok_all = False
+                    feedback.append(("error", f"{name} FAILED: {info}"))
+            if ok_all:
+                st.session_state["settings_ok"] = True
+                st.session_state["settings_fingerprint"] = current_fp
+                feedback.append(("success", "All agents passed."))
+                if autosave:
+                    save_settings({
+                        "pro_key": payload["pro_key"], "pro_url": payload["pro_url"], "pro_model": payload["pro_model"], "pro_temp": float(payload["pro_temp"]),
+                        "con_key": payload["con_key"], "con_url": payload["con_url"], "con_model": payload["con_model"], "con_temp": float(payload["con_temp"]),
+                        "judge_key": payload["judge_key"], "judge_url": payload["judge_url"], "judge_model": payload["judge_model"], "judge_temp": float(payload["judge_temp"]),
+                    })
+                    feedback.append(("info", f"Settings saved to {SETTINGS_PATH}"))
+            else:
+                _reset_settings_ok()
+    except Exception as e:
+        _reset_settings_ok()
+        feedback.append(("error", f"构建或检查失败：{type(e).__name__}: {e}"))
+    finally:
+        st.session_state["check_feedback"] = feedback
+        st.session_state["is_checking"] = False
+        st.session_state["_pending_check"] = None
+        st.rerun()
+
+# B) 有挂起的“运行”任务
+elif st.session_state.get("is_running", False) and st.session_state.get("_pending_run"):
+    payload = st.session_state["_pending_run"]
+    topic = payload["topic"]
+    max_rounds = int(payload["max_rounds"])
+    pro_key, pro_url, pro_model, pro_temp = payload["pro"]["key"], payload["pro"]["url"], payload["pro"]["model"], float(payload["pro"]["temp"])
+    con_key, con_url, con_model, con_temp = payload["con"]["key"], payload["con"]["url"], payload["con"]["model"], float(payload["con"]["temp"])
+    judge_key, judge_url, judge_model, judge_temp = payload["judge"]["key"], payload["judge"]["url"], payload["judge"]["model"], float(payload["judge"]["temp"])
+
+    # 清空显示区（运行时才清空）
+    info_ph.empty(); status_ph.empty(); transcript_ph.empty(); verdict_ph.empty()
+
     missing = []
     if not pro_key: missing.append("Pro API Key")
     if not pro_url: missing.append("Pro Base URL")
@@ -414,9 +472,10 @@ elif run_button:
     if not judge_url: missing.append("Judge Base URL")
     if missing:
         st.error("以下字段必填： " + "、".join(missing))
-        st.stop()
+        st.session_state["is_running"] = False
+        st.session_state["_pending_run"] = None
+        st.rerun()
 
-    # 新对局开始：清空去重缓存、清掉已打开文件
     st.session_state["rendered_keys"] = []
     st.session_state["opened_run_data"] = None
 
@@ -437,75 +496,62 @@ elif run_button:
         return build_agents(
             pro_key, pro_url, pro_model, float(pro_temp),
             con_key, con_url, con_model, float(con_temp),
-            judge_key, judge_url, judge_model, float(judge_temp),
+            judge_key, judge_url, payload["judge"]["model"], float(payload["judge"]["temp"]),
         )
 
     app = build_app(agents_factory=agents_factory)
 
-    # 先显示 Host，并立即提示“正方正在回答…”
-    with transcript_ph:
+    transcript_box = transcript_ph.container()
+    verdict_box = verdict_ph.container()
+
+    with transcript_box:
         render_one_message(init_state["transcript"][0])
     status_ph.info("正方正在回答...")
 
     last_len = 1
-    for update in app.stream(init_state, stream_mode="values"):  # type: ignore
-        tr = update.get("transcript", [])
-        if len(tr) > last_len:
-            # 先渲染新增消息（带去重）
-            with transcript_ph:
-                render_transcript(tr, start_idx=last_len)
-            last_role = tr[-1]["role"] if tr else ""
+    update = init_state
 
-            # 计算下一位
-            next_role = None
-            if last_role == "Pro":
-                next_role = "Con"
-            elif last_role == "Con":
-                # con 节点里已递增 round；满回合则到 Judge
-                if update.get("round", 0) >= update.get("max_rounds", 0):
-                    next_role = "Judge"
+    try:
+        for update in app.stream(init_state, stream_mode="values"):  # type: ignore
+            tr = update.get("transcript", [])
+            if len(tr) > last_len:
+                with transcript_box:
+                    render_transcript(tr, start_idx=last_len)
+
+                last_role = tr[-1]["role"] if tr else ""
+                next_role = None
+                if last_role == "Pro":
+                    next_role = "Con"
+                elif last_role == "Con":
+                    next_role = "Judge" if update.get("round", 0) >= update.get("max_rounds", 0) else "Pro"
+                elif last_role == "Judge":
+                    next_role = None
+
+                msg_map = {"Pro": "正方正在回答...", "Con": "反方正在回答...", "Judge": "裁判正在评价..."}
+                if next_role:
+                    status_ph.info(msg_map[next_role])
                 else:
-                    next_role = "Pro"
-            elif last_role == "Judge":
-                next_role = None  # 已结束
+                    status_ph.empty()
 
-            # 更新状态提示（在消息下面）
-            msg_map = {
-                "Pro": "正方正在回答...",
-                "Con": "反方正在回答...",
-                "Judge": "裁判正在评价...",
-            }
-            if next_role:
-                status_ph.info(msg_map[next_role])
-            else:
-                status_ph.empty()
+                last_len = len(tr)
+    finally:
+        final_state = update
+        out_path = RUNS_PATH / f"{run_id}.json"
+        out_path.write_text(json.dumps(final_state, ensure_ascii=False, indent=2), encoding="utf-8")
+        st.session_state["last_run_state"] = final_state
+        st.session_state["is_running"] = False
+        st.session_state["_pending_run"] = None
+        st.rerun()
 
-            last_len = len(tr)
+# C) 打开历史对局（非运行/检查态）
+elif st.session_state.get("opened_run_data") is not None and not st.session_state.get("is_running", False) and not st.session_state.get("is_checking", False):
+    data = st.session_state["opened_run_data"]
+    _render_from_state(data)
 
-    status_ph.empty()
-
-    # 最后一帧即最终状态
-    final_state = update
-    out_path = RUNS_PATH / f"{run_id}.json"
-    out_path.write_text(json.dumps(final_state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # 把最终状态放进 session，后续任何交互（比如勾选 Show Pro/Con）都能重绘
-    st.session_state["last_run_state"] = final_state
-
-    with verdict_ph:
-        render_verdict(final_state.get("final_verdict", {}))
-
-    st.success(f"Saved to {out_path}")
-    st.download_button(
-        label="Download run JSON",
-        data=out_path.read_bytes(),
-        file_name=out_path.name,
-        mime="application/json",
-    )
-
-# 没有“Open Selected”且没有刚运行，但存在“最近一次运行”的状态 —— 也要重绘，保证交互不清空
-elif st.session_state.get("last_run_state") is not None:
+# D) 最近一次运行状态（非运行/检查态）
+elif st.session_state.get("last_run_state") is not None and not st.session_state.get("is_running", False) and not st.session_state.get("is_checking", False):
     _render_from_state(st.session_state["last_run_state"])
 
+# E) 欢迎提示
 else:
-    info_ph.info("在左侧填写 Topic / Rounds 与三位 Agent 配置。建议先点击 “Check Settings” 做一次快速检查并保存设置；也可直接运行。")
+    info_ph.info("在左侧填写 Topic / Rounds 与三位 Agent 配置。点击 “Run Debate” 或 “Check Settings” 后左侧将暂时锁定；检查期间主区域不会清空；完成后自动恢复，检查结果显示在 Agent 设置下方。")
